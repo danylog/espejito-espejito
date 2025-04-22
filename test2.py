@@ -6,7 +6,7 @@ from keras.models import load_model
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
 # Load pre-trained emotion detection model
-emotion_model = load_model('fer.h5')  # Make sure you have a trained model
+emotion_model = load_model('fer.hdf5')  # Make sure you have a trained model
 emotions = ['Angry', 'Disgust', 'Fear', 'Happy', 'Sad', 'Surprise', 'Neutral']
 
 # Initialize the webcam

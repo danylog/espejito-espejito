@@ -1,15 +1,19 @@
 from transformers import AutoImageProcessor, AutoModelForImageClassification
 import torch
-from PIL import Image
 import cv2
-import numpy as np
-from typing import Union, Dict, List
+from datetime import datetime
+from typing import List, Dict
 
-class FacialEmotionDetector:
+class CameraFacialEmotionDetector:
     def __init__(self):
-        # Load the processor and model
-        self.processor = AutoImageProcessor.from_pretrained("prithivMLmods/Facial-Emotion-Detection-SigLIP2")
-        self.model = AutoModelForImageClassification.from_pretrained("prithivMLmods/Facial-Emotion-Detection-SigLIP2")
+        # Load the processor and model with `use_fast=False`
+        self.processor = AutoImageProcessor.from_pretrained(
+            "prithivMLmods/Facial-Emotion-Detection-SigLIP2", use_fast=False
+        )
+        self.model = AutoModelForImageClassification.from_pretrained(
+            "prithivMLmods/Facial-Emotion-Detection-SigLIP2"
+        )
+        self.model.eval()  # Set model to evaluation mode
         
         # Define emotion mapping for the model
         self.emotion_mapping = {
@@ -24,41 +28,42 @@ class FacialEmotionDetector:
         # Load the Haar cascade for face detection
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
-    def detect_faces(self, image: np.ndarray) -> List[Dict[str, int]]:
+    def detect_faces(self, frame: cv2.Mat) -> List[Dict[str, int]]:
         """
-        Detect faces in an image using Haar cascades.
+        Detect faces in a video frame using Haar cascades.
         Args:
-            image (numpy.ndarray): Input image
+            frame (cv2.Mat): A single frame from the video
         
         Returns:
             List[Dict[str, int]]: List of bounding boxes for detected faces
         """
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(48, 48))
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(48, 48))
         return [{'x': x, 'y': y, 'w': w, 'h': h} for (x, y, w, h) in faces]
 
-    def process_face(self, face_roi: np.ndarray) -> Dict:
+    def process_face(self, face_roi: cv2.Mat) -> Dict:
         """
         Predict emotions for a cropped face.
         Args:
-            face_roi (numpy.ndarray): Cropped image of a face
+            face_roi (cv2.Mat): Cropped image of a face
         
         Returns:
             Dict: Predicted top emotion and scores for all emotions
         """
-        # Convert face ROI to PIL Image
-        face_pil = Image.fromarray(cv2.cvtColor(face_roi, cv2.COLOR_BGR2RGB))
+        # Resize face to match model's input size
+        face_resized = cv2.resize(face_roi, (224, 224))
+        face_rgb = cv2.cvtColor(face_resized, cv2.COLOR_BGR2RGB)
         
-        # Process the image
-        inputs = self.processor(images=face_pil, return_tensors="pt")
+        # Convert to tensor
+        inputs = self.processor(images=[face_rgb], return_tensors="pt")
         
-        # Get predictions
+        # Perform inference
         with torch.no_grad():
             outputs = self.model(**inputs)
             probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
         
         # Get the top prediction
-        predicted_class = outputs.logits.argmax(-1).item()
+        predicted_class = probs.argmax().item()
         confidence = probs[0][predicted_class].item()
         
         # Map predictions to emotions
@@ -74,48 +79,55 @@ class FacialEmotionDetector:
             'all_emotions': predictions
         }
 
-    def analyze_image(self, image_path: str) -> List[Dict]:
+    def analyze_camera_feed(self):
         """
-        Analyze an image for emotions in detected faces.
-        Args:
-            image_path (str): Path to the input image
-        
-        Returns:
-            List[Dict]: List of emotions detected for each face
+        Analyze video frames from the camera and output detected emotions.
         """
-        # Load the image
-        image = cv2.imread(image_path)
-        if image is None:
-            raise ValueError(f"Could not load image at path: {image_path}")
-        
-        # Detect faces
-        faces = self.detect_faces(image)
-        
-        # Analyze emotions for each detected face
-        results = []
-        for face in faces:
-            x, y, w, h = face['x'], face['y'], face['w'], face['h']
-            face_roi = image[y:y+h, x:x+w]
-            emotions = self.process_face(face_roi)
-            results.append({
-                'face': face,
-                'emotions': emotions
-            })
-        
-        return results
+        cap = cv2.VideoCapture(0)  # Open the default camera (camera index 0)
+        if not cap.isOpened():
+            raise RuntimeError("Could not open the camera")
+
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    print("Failed to capture frame. Exiting...")
+                    break
+                
+                # Detect faces in the frame
+                faces = self.detect_faces(frame)
+                
+                for face in faces:
+                    x, y, w, h = face['x'], face['y'], face['w'], face['h']
+                    face_roi = frame[y:y+h, x:x+w]
+                    
+                    # Process face to detect emotion
+                    emotions = self.process_face(face_roi)
+                    
+                    # Output the detected emotions
+                    timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                    print(f"Timestamp: {timestamp}")
+                    print(f"Face at (x: {x}, y: {y}, w: {w}, h: {h})")
+                    print(f"  Top Emotion: {emotions['top_emotion']} ({emotions['confidence']:.2f})")
+                    print("  All Emotions:")
+                    for emotion in emotions['all_emotions']:
+                        print(f"    - {emotion['emotion']}: {emotion['confidence']:.2f}")
+                
+                # Exit on key press (e.g., 'q')
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    print("Exiting...")
+                    break
+
+        finally:
+            cap.release()  # Release the camera
 
 # Example usage
 if __name__ == "__main__":
-    detector = FacialEmotionDetector()
-    image_path = "path/to/your/image.jpg"  # Replace with the path to your image
+    detector = CameraFacialEmotionDetector()
     
     try:
-        results = detector.analyze_image(image_path)
-        for i, result in enumerate(results):
-            print(f"Face {i + 1}:")
-            print(f"  Top Emotion: {result['emotions']['top_emotion']} ({result['emotions']['confidence']:.2f})")
-            print("  All Emotions:")
-            for emotion in result['emotions']['all_emotions']:
-                print(f"    - {emotion['emotion']}: {emotion['confidence']:.2f}")
+        print("Starting emotion detection from the camera...")
+        print("Press 'q' to stop.")
+        detector.analyze_camera_feed()
     except Exception as e:
         print(f"Error: {e}")

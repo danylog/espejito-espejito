@@ -1,127 +1,165 @@
-import cv2
-import time
-from transformers import pipeline
+from transformers import AutoImageProcessor, AutoModelForImageClassification
+import torch
+from PIL import Image
 import numpy as np
+import cv2
+from datetime import datetime
+from typing import Union, Dict, Tuple
 
-class EmotionDetector:
+class FacialEmotionDetector:
     def __init__(self):
-        print("Initializing EmotionDetector...")
+        # Using AutoImageProcessor instead of AutoProcessor
+        self.processor = AutoImageProcessor.from_pretrained("prithivMLmods/Facial-Emotion-Detection-SigLIP2")
+        self.model = AutoModelForImageClassification.from_pretrained("prithivMLmods/Facial-Emotion-Detection-SigLIP2")
         
-        # Initialize face detection
-        print("Loading face detection model...")
+        # Define the specific emotion mapping
+        self.emotion_mapping = {
+            0: 'Ahegao',
+            1: 'Angry',
+            2: 'Happy',
+            3: 'Neutral',
+            4: 'Sad',
+            5: 'Surprise'
+        }
+        
+        # Colors for each emotion (BGR format)
+        self.emotion_colors = {
+            'Ahegao': (255, 192, 203),  # Pink
+            'Angry': (0, 0, 255),       # Red
+            'Happy': (0, 255, 0),       # Green
+            'Neutral': (128, 128, 128),  # Gray
+            'Sad': (255, 0, 0),         # Blue
+            'Surprise': (0, 255, 255)    # Yellow
+        }
+        
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
+    def process_image(self, 
+                     image: Union[str, np.ndarray, Image.Image],
+                     confidence_threshold: float = 0.5) -> Dict:
+        """Process a single image and return emotion predictions"""
         
-        # Initialize emotion detection
-        print("Loading emotion detection model...")
-        self.classifier = pipeline(
-            "image-classification",
-            model="j-hartmann/emotion-english-distilroberta-base",
-            top_k=1
-        )
-    
-    def detect_and_predict(self, frame):
-        # Convert to grayscale for face detection
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # Convert input to PIL Image
+        if isinstance(image, str):
+            img = Image.open(image)
+        elif isinstance(image, np.ndarray):
+            img = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        elif isinstance(image, Image.Image):
+            img = image
+        else:
+            raise ValueError("Unsupported image format")
+
+        # Process image
+        inputs = self.processor(images=img, return_tensors="pt")
         
-        # Detect faces
-        faces = self.face_cascade.detectMultiScale(
-            gray,
-            scaleFactor=1.1,
-            minNeighbors=5,
-            minSize=(30, 30)
-        )
+        # Get predictions
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
+
+        # Get predicted class and probability
+        predicted_class = outputs.logits.argmax(-1).item()
+        confidence = probs[0][predicted_class].item()
         
-        # Process each face
-        for (x, y, w, h) in faces:
-            # Extract face ROI
-            face_roi = frame[y:y+h, x:x+w]
+        # Get all predictions above threshold
+        predictions = []
+        for idx, prob in enumerate(probs[0]):
+            score = prob.item()
+            if score >= confidence_threshold:
+                predictions.append({
+                    'emotion': self.emotion_mapping[idx],
+                    'confidence': score
+                })
+        
+        # Sort by confidence
+        predictions.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        return {
+            'top_emotion': self.emotion_mapping[predicted_class],
+            'confidence': confidence,
+            'all_emotions': predictions,
+            'timestamp': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        }
+
+    def process_video_stream(self, 
+                           source: Union[int, str] = 0,
+                           display_results: bool = True,
+                           confidence_threshold: float = 0.5):
+        """Process video stream (webcam or video file)"""
+        cap = cv2.VideoCapture(source)
+        
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            # Convert to grayscale for face detection
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = self.face_cascade.detectMultiScale(gray, 1.1, 4)
             
-            try:
-                # Convert BGR to RGB
-                rgb_roi = cv2.cvtColor(face_roi, cv2.COLOR_BGR2RGB)
+            # Add timestamp and user info to frame
+            timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+            cv2.putText(frame, f"Current Date and Time (UTC - YYYY-MM-DD HH:MM:SS formatted): {timestamp}", 
+                      (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(frame, "Current User's Login: danylog", 
+                      (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
+            for (x, y, w, h) in faces:
+                # Extract face ROI
+                face_roi = frame[y:y+h, x:x+w]
                 
-                # Get emotion prediction
-                prediction = self.classifier(rgb_roi)[0]
-                emotion = prediction['label']
-                score = prediction['score']
+                try:
+                    # Process face for emotion detection
+                    results = self.process_image(face_roi, confidence_threshold)
+                    
+                    if display_results:
+                        # Get color for detected emotion
+                        emotion_color = self.emotion_colors[results['top_emotion']]
+                        
+                        # Draw rectangle around face
+                        cv2.rectangle(frame, (x, y), (x+w, y+h), emotion_color, 2)
+                        
+                        # Display emotion and confidence
+                        text = f"{results['top_emotion']}: {results['confidence']:.2f}"
+                        cv2.putText(frame, text, (x, y-10),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                                  emotion_color, 2)
+                        
+                        # Display all detected emotions
+                        y_offset = y + h + 20
+                        for emotion in results['all_emotions'][:3]:  # Show top 3 emotions
+                            emotion_text = f"{emotion['emotion']}: {emotion['confidence']:.2f}"
+                            cv2.putText(frame, emotion_text, (x, y_offset),
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                                      self.emotion_colors[emotion['emotion']], 1)
+                            y_offset += 20
+                            
+                except Exception as e:
+                    print(f"Error processing face: {str(e)}")
+                    continue
+            
+            if display_results:
+                cv2.imshow('Facial Emotion Detection', frame)
                 
-                # Draw rectangle around face
-                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            # Press 'q' to quit
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
                 
-                # Add text with emotion and confidence
-                text = f"{emotion}: {score*100:.1f}%"
-                cv2.putText(frame, text, (x, y-10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                           (0, 255, 0), 2)
-                
-            except Exception as e:
-                print(f"Error processing face: {e}")
-                continue
-        
-        return frame
+        cap.release()
+        if display_results:
+            cv2.destroyAllWindows()
 
 def main():
-    print("Starting emotion detection system...")
+    detector = FacialEmotionDetector()
     
-    # Initialize camera
-    print("Initializing camera...")
-    cap = cv2.VideoCapture(0)
-    
-    # Set lower resolution for better performance
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    
-    # Initialize detector
-    detector = EmotionDetector()
-    
-    # FPS calculation variables
-    fps_start_time = time.time()
-    fps_counter = 0
-    fps = 0
-    frame_skip = 2  # Process every 2nd frame
-    
-    print("Ready! Press 'q' to quit.")
-    
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Failed to grab frame")
-            break
-        
-        # Skip frames for better performance
-        fps_counter += 1
-        if fps_counter % frame_skip != 0:
-            cv2.imshow('Emotion Detection', frame)
-            continue
-        
-        # Process frame
-        try:
-            processed_frame = detector.detect_and_predict(frame)
-            
-            # Calculate FPS
-            if time.time() - fps_start_time > 1:
-                fps = fps_counter
-                fps_counter = 0
-                fps_start_time = time.time()
-            
-            # Display FPS
-            cv2.putText(processed_frame, f"FPS: {fps}", (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            
-            # Show frame
-            cv2.imshow('Emotion Detection', processed_frame)
-            
-        except Exception as e:
-            print(f"Error processing frame: {e}")
-            continue
-        
-        # Check for quit
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-    
-    # Cleanup
-    cap.release()
-    cv2.destroyAllWindows()
+    try:
+        # Process video stream (webcam)
+        detector.process_video_stream(
+            source=0,  # Use 0 for webcam
+            confidence_threshold=0.5
+        )
+    except Exception as e:
+        print(f"Error: {str(e)}")
 
 if __name__ == "__main__":
     main()
